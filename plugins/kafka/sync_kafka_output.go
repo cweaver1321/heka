@@ -13,21 +13,11 @@
 #
 # ***** END LICENSE BLOCK *****/
 
-/******
-We are adding the AsyncKafkaOutput to use an AsyncProducer for efficiency sake.
-Here are some important notes from Sarama which is the kafka library that the
-AsyncKafkaOutput is using.
-
-"The SyncProducer provides a method which will block until Kafka acknowledges
-the message as produced. This can be useful but comes with two caveats: it will
-generally be less efficient, and the actual durability guarantees depend on the
-configured value of `Producer.RequiredAcks`"
-- hence why we are using the AsyncProducer
-
-"You must read from the Errors() channel or the producer will deadlock."
-  - hence why we are reading from the Errors() channel
-******/
-
+/*
+ For those who want better control of delivery failures with a 10X performance
+ degradation.
+ https://github.com/mozilla-services/heka/pull/1777
+*/
 package kafka
 
 import (
@@ -41,7 +31,7 @@ import (
 	"github.com/mozilla-services/heka/pipeline"
 )
 
-type AsyncKafkaOutputConfig struct {
+type SyncKafkaOutputConfig struct {
 	// Client Config
 	Id                         string
 	Addrs                      []string
@@ -70,11 +60,9 @@ type AsyncKafkaOutputConfig struct {
 	MaxBufferedBytes           uint32 `toml:"max_buffered_bytes"`
 	BackPressureThresholdBytes uint32 `toml:"back_pressure_threshold_bytes"`
 	MaxMessageBytes            uint32 `toml:"max_message_bytes"`
-	MinPacketMsg               uint32 `toml:"min_packet_msg"`
-	MaxPacketMsg               uint32 `toml:"max_packet_msg"`
 }
 
-type AsyncKafkaOutput struct {
+type SyncKafkaOutput struct {
 	processMessageCount    int64
 	processMessageFailures int64
 	processMessageDiscards int64
@@ -83,15 +71,16 @@ type AsyncKafkaOutput struct {
 
 	hashVariable   *messageVariable
 	topicVariable  *messageVariable
-	config         *AsyncKafkaOutputConfig
+	config         *SyncKafkaOutputConfig
 	saramaConfig   *sarama.Config
-	producer       sarama.AsyncProducer
+	client         sarama.Client
+	producer       sarama.SyncProducer
 	pipelineConfig *pipeline.PipelineConfig
 }
 
-func (k *AsyncKafkaOutput) ConfigStruct() interface{} {
+func (k *SyncKafkaOutput) ConfigStruct() interface{} {
 	hn := k.pipelineConfig.Hostname()
-	return &AsyncKafkaOutputConfig{
+	return &SyncKafkaOutputConfig{
 		Id:                         hn,
 		MetadataRetries:            3,
 		WaitForElection:            250,
@@ -106,17 +95,15 @@ func (k *AsyncKafkaOutput) ConfigStruct() interface{} {
 		CompressionCodec:           "None",
 		MaxBufferTime:              1,
 		MaxBufferedBytes:           1,
-		MinPacketMsg:               1,
-		MaxPacketMsg:               1000,
 	}
 }
 
-func (k *AsyncKafkaOutput) SetPipelineConfig(pConfig *pipeline.PipelineConfig) {
+func (k *SyncKafkaOutput) SetPipelineConfig(pConfig *pipeline.PipelineConfig) {
 	k.pipelineConfig = pConfig
 }
 
-func (k *AsyncKafkaOutput) Init(config interface{}) (err error) {
-	k.config = config.(*AsyncKafkaOutputConfig)
+func (k *SyncKafkaOutput) Init(config interface{}) (err error) {
+	k.config = config.(*SyncKafkaOutputConfig)
 	if len(k.config.Addrs) == 0 {
 		return errors.New("addrs must have at least one entry")
 	}
@@ -124,9 +111,7 @@ func (k *AsyncKafkaOutput) Init(config interface{}) (err error) {
 	if k.config.MaxMessageBytes == 0 {
 		k.config.MaxMessageBytes = message.MAX_RECORD_SIZE
 	}
-	// CWEAVE208 - LOGGER ****************************************************
-	// sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
-	// CWEAVE208 - LOGGER ****************************************************
+
 	k.saramaConfig = sarama.NewConfig()
 	k.saramaConfig.ClientID = k.config.Id
 	k.saramaConfig.Metadata.Retry.Max = k.config.MetadataRetries
@@ -193,22 +178,19 @@ func (k *AsyncKafkaOutput) Init(config interface{}) (err error) {
 
 	k.saramaConfig.Producer.Flush.Bytes = int(k.config.MaxBufferedBytes)
 	k.saramaConfig.Producer.Flush.Frequency = time.Duration(k.config.MaxBufferTime) * time.Millisecond
-	k.saramaConfig.Producer.Flush.Messages = int(k.config.MinPacketMsg)
-	k.saramaConfig.Producer.Flush.MaxMessages = int(k.config.MaxPacketMsg)
 
-	// We don't have any reason to capture the Successes, so leave it set to false
-	// config.Producer.Return.Successes = true
-	k.producer, err = sarama.NewAsyncProducer(k.config.Addrs, k.saramaConfig)
+	k.client, err = sarama.NewClient(k.config.Addrs, k.saramaConfig)
 	if err != nil {
 		return err
 	}
-
+	k.producer, err = sarama.NewSyncProducer(k.config.Addrs, k.saramaConfig)
 	return err
 }
 
-func (k *AsyncKafkaOutput) Run(or pipeline.OutputRunner, h pipeline.PluginHelper) (err error) {
+func (k *SyncKafkaOutput) Run(or pipeline.OutputRunner, h pipeline.PluginHelper) (err error) {
 	defer func() {
 		k.producer.Close()
+		k.client.Close()
 	}()
 
 	if or.Encoder() == nil {
@@ -248,20 +230,37 @@ func (k *AsyncKafkaOutput) Run(or pipeline.OutputRunner, h pipeline.PluginHelper
 			pack.Recycle(nil)
 			continue
 		}
-
-		k.producer.Input() <- &sarama.ProducerMessage{
+		pMessage := &sarama.ProducerMessage{
 			Topic: topic,
 			Key:   key,
 			Value: sarama.ByteEncoder(msgBytes),
 		}
-		or.UpdateCursor(pack.QueueCursor)
-		pack.Recycle(nil)
+
+		partition, offset, err := k.producer.SendMessage(pMessage)
+		_ = partition
+		_ = offset
+
+		if err != nil {
+			switch err.(type) {
+			case sarama.PacketEncodingError:
+				atomic.AddInt64(&k.kafkaEncodingErrors, 1)
+				or.LogError(fmt.Errorf("kafka encoding error: %s", err.Error()))
+			default:
+				e := pipeline.NewRetryMessageError(err.Error())
+				pack.Recycle(e)
+				atomic.AddInt64(&k.kafkaDroppedMessages, 1)
+				or.LogError(fmt.Errorf("kafka raised error: %s while sending: %s", err.Error(), pMessage.Value))
+			}
+		} else {
+			or.UpdateCursor(pack.QueueCursor)
+			pack.Recycle(nil)
+		}
 	}
 
 	return
 }
 
-func (k *AsyncKafkaOutput) ReportMsg(msg *message.Message) error {
+func (k *SyncKafkaOutput) ReportMsg(msg *message.Message) error {
 	message.NewInt64Field(msg, "ProcessMessageCount",
 		atomic.LoadInt64(&k.processMessageCount), "count")
 	message.NewInt64Field(msg, "ProcessMessageFailures",
@@ -275,12 +274,12 @@ func (k *AsyncKafkaOutput) ReportMsg(msg *message.Message) error {
 	return nil
 }
 
-func (k *AsyncKafkaOutput) CleanupForRestart() {
+func (k *SyncKafkaOutput) CleanupForRestart() {
 	return
 }
 
 func init() {
-	pipeline.RegisterPlugin("AsyncKafkaOutput", func() interface{} {
-		return new(AsyncKafkaOutput)
+	pipeline.RegisterPlugin("SyncKafkaOutput", func() interface{} {
+		return new(SyncKafkaOutput)
 	})
 }

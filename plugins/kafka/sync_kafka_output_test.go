@@ -28,7 +28,7 @@ import (
 	"github.com/rafrombrc/gomock/gomock"
 )
 
-func AsyncTestVerifyMessageInvalidVariables(t *testing.T) {
+func SyncTestVerifyMessageInvalidVariables(t *testing.T) {
 	tests := []string{
 		"Timestamp",
 		"Uuid",
@@ -50,7 +50,7 @@ func AsyncTestVerifyMessageInvalidVariables(t *testing.T) {
 	}
 }
 
-func AsyncTestGetMessageVariable(t *testing.T) {
+func SyncTestGetMessageVariable(t *testing.T) {
 	field, _ := message.NewField("foo", "bar", "")
 	msg := &message.Message{}
 	msg.SetType("TEST")
@@ -111,11 +111,11 @@ func AsyncTestGetMessageVariable(t *testing.T) {
 	}
 }
 
-func AsyncTestEmptyAddress(t *testing.T) {
+func SyncTestEmptyAddress(t *testing.T) {
 	pConfig := NewPipelineConfig(nil)
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	err := ko.Init(config)
 
 	errmsg := "addrs must have at least one entry"
@@ -124,11 +124,11 @@ func AsyncTestEmptyAddress(t *testing.T) {
 	}
 }
 
-func AsyncTestInvalidPartitioner(t *testing.T) {
+func SyncTestInvalidPartitioner(t *testing.T) {
 	pConfig := NewPipelineConfig(nil)
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	config.Addrs = append(config.Addrs, "localhost:5432")
 	config.Partitioner = "widget"
 	err := ko.Init(config)
@@ -139,11 +139,11 @@ func AsyncTestInvalidPartitioner(t *testing.T) {
 	}
 }
 
-func AsyncTestRandomPartitionerWithHash(t *testing.T) {
+func SyncTestRandomPartitionerWithHash(t *testing.T) {
 	pConfig := NewPipelineConfig(nil)
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	config.Addrs = append(config.Addrs, "localhost:5432")
 	config.Topic = "test"
 	config.Partitioner = "Random"
@@ -156,11 +156,11 @@ func AsyncTestRandomPartitionerWithHash(t *testing.T) {
 	}
 }
 
-func AsyncTestHashPartitionerWithInvalidHashVariable(t *testing.T) {
+func SyncTestHashPartitionerWithInvalidHashVariable(t *testing.T) {
 	pConfig := NewPipelineConfig(nil)
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	config.Addrs = append(config.Addrs, "localhost:5432")
 	config.Topic = "test"
 	config.Partitioner = "Hash"
@@ -173,11 +173,11 @@ func AsyncTestHashPartitionerWithInvalidHashVariable(t *testing.T) {
 	}
 }
 
-func AsyncTestRoundRobinPartitionerWithHash(t *testing.T) {
+func SyncTestRoundRobinPartitionerWithHash(t *testing.T) {
 	pConfig := NewPipelineConfig(nil)
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	config.Addrs = append(config.Addrs, "localhost:5432")
 	config.Topic = "test"
 	config.Partitioner = "RoundRobin"
@@ -190,11 +190,11 @@ func AsyncTestRoundRobinPartitionerWithHash(t *testing.T) {
 	}
 }
 
-func AsyncTestNoTopic(t *testing.T) {
+func SyncTestNoTopic(t *testing.T) {
 	pConfig := NewPipelineConfig(nil)
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	config.Addrs = append(config.Addrs, "localhost:5432")
 	err := ko.Init(config)
 
@@ -204,11 +204,11 @@ func AsyncTestNoTopic(t *testing.T) {
 	}
 }
 
-func AsyncTestInvalidTopicVariable(t *testing.T) {
+func SyncTestInvalidTopicVariable(t *testing.T) {
 	pConfig := NewPipelineConfig(nil)
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	config.Addrs = append(config.Addrs, "localhost:5432")
 	config.TopicVariable = "bogus"
 	err := ko.Init(config)
@@ -219,11 +219,11 @@ func AsyncTestInvalidTopicVariable(t *testing.T) {
 	}
 }
 
-func AsyncTestConflictingTopic(t *testing.T) {
+func SyncTestConflictingTopic(t *testing.T) {
 	pConfig := NewPipelineConfig(nil)
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	config.Addrs = append(config.Addrs, "localhost:5432")
 	config.Topic = "test"
 	config.TopicVariable = "Type"
@@ -235,11 +235,11 @@ func AsyncTestConflictingTopic(t *testing.T) {
 	}
 }
 
-func AsyncTestInvalidRequiredAcks(t *testing.T) {
+func SyncTestInvalidRequiredAcks(t *testing.T) {
 	pConfig := NewPipelineConfig(nil)
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	config.Addrs = append(config.Addrs, "localhost:5432")
 	config.Topic = "test"
 	config.RequiredAcks = "whenever"
@@ -251,11 +251,11 @@ func AsyncTestInvalidRequiredAcks(t *testing.T) {
 	}
 }
 
-func AsyncTestInvalidCompressionCodec(t *testing.T) {
+func SyncTestInvalidCompressionCodec(t *testing.T) {
 	pConfig := NewPipelineConfig(nil)
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	config.Addrs = append(config.Addrs, "localhost:5432")
 	config.Topic = "test"
 	config.CompressionCodec = "squash"
@@ -267,7 +267,7 @@ func AsyncTestInvalidCompressionCodec(t *testing.T) {
 	}
 }
 
-func AsyncTestSendMessage(t *testing.T) {
+func SyncTestSendMessage(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	broker := sarama.NewMockBroker(t, 2)
 
@@ -287,9 +287,9 @@ func AsyncTestSendMessage(t *testing.T) {
 		"ProduceRequest": sarama.NewMockProduceResponse(t),
 	})
 
-	ko := new(AsyncKafkaOutput)
+	ko := new(SyncKafkaOutput)
 	ko.SetPipelineConfig(pConfig)
-	config := ko.ConfigStruct().(*AsyncKafkaOutputConfig)
+	config := ko.ConfigStruct().(*SyncKafkaOutputConfig)
 	config.Addrs = append(config.Addrs, broker.Addr())
 	config.Topic = topic
 	err := ko.Init(config)

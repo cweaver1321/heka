@@ -10,6 +10,7 @@
 # Contributor(s):
 #   Mike Trinkala (trink@mozilla.com)
 #   Rob Miller (rmiller@mozilla.com)
+#   Matt Moyer (moyer@simple.com)
 #
 # ***** END LICENSE BLOCK *****/
 
@@ -20,12 +21,14 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/Shopify/sarama"
 	"github.com/mozilla-services/heka/message"
 	"github.com/mozilla-services/heka/pipeline"
+	"github.com/mozilla-services/heka/plugins/tcp"
 )
 
 type KafkaOutputConfig struct {
@@ -35,6 +38,10 @@ type KafkaOutputConfig struct {
 	MetadataRetries            int    `toml:"metadata_retries"`
 	WaitForElection            uint32 `toml:"wait_for_election"`
 	BackgroundRefreshFrequency uint32 `toml:"background_refresh_frequency"`
+
+	// TLS Config
+	UseTls bool `toml:"use_tls"`
+	Tls    tcp.TlsConfig
 
 	// Broker Config
 	MaxOpenRequests int    `toml:"max_open_reqests"`
@@ -57,6 +64,8 @@ type KafkaOutputConfig struct {
 	MaxBufferedBytes           uint32 `toml:"max_buffered_bytes"`
 	BackPressureThresholdBytes uint32 `toml:"back_pressure_threshold_bytes"`
 	MaxMessageBytes            uint32 `toml:"max_message_bytes"`
+	MinPacketMsg               uint32 `toml:"min_packet_msg"`
+	MaxPacketMsg               uint32 `toml:"max_packet_msg"`
 }
 
 var fieldRegex = regexp.MustCompile("^Fields\\[([^\\]]*)\\](?:\\[(\\d+)\\])?(?:\\[(\\d+)\\])?$")
@@ -79,8 +88,7 @@ type KafkaOutput struct {
 	topicVariable  *messageVariable
 	config         *KafkaOutputConfig
 	saramaConfig   *sarama.Config
-	client         sarama.Client
-	producer       sarama.SyncProducer
+	producer       sarama.AsyncProducer
 	pipelineConfig *pipeline.PipelineConfig
 }
 
@@ -101,6 +109,8 @@ func (k *KafkaOutput) ConfigStruct() interface{} {
 		CompressionCodec:           "None",
 		MaxBufferTime:              1,
 		MaxBufferedBytes:           1,
+		MinPacketMsg:               1,
+		MaxPacketMsg:               1000,
 	}
 }
 
@@ -214,6 +224,13 @@ func (k *KafkaOutput) Init(config interface{}) (err error) {
 	k.saramaConfig.Metadata.Retry.Backoff = time.Duration(k.config.WaitForElection) * time.Millisecond
 	k.saramaConfig.Metadata.RefreshFrequency = time.Duration(k.config.BackgroundRefreshFrequency) * time.Millisecond
 
+	k.saramaConfig.Net.TLS.Enable = k.config.UseTls
+	if k.config.UseTls {
+		if k.saramaConfig.Net.TLS.Config, err = tcp.CreateGoTlsConfig(&k.config.Tls); err != nil {
+			return fmt.Errorf("TLS init error: %s", err)
+		}
+	}
+
 	k.saramaConfig.Net.MaxOpenRequests = k.config.MaxOpenRequests
 	k.saramaConfig.Net.DialTimeout = time.Duration(k.config.DialTimeout) * time.Millisecond
 	k.saramaConfig.Net.ReadTimeout = time.Duration(k.config.ReadTimeout) * time.Millisecond
@@ -274,19 +291,50 @@ func (k *KafkaOutput) Init(config interface{}) (err error) {
 
 	k.saramaConfig.Producer.Flush.Bytes = int(k.config.MaxBufferedBytes)
 	k.saramaConfig.Producer.Flush.Frequency = time.Duration(k.config.MaxBufferTime) * time.Millisecond
+	k.saramaConfig.Producer.Flush.Messages = int(k.config.MinPacketMsg)
+	k.saramaConfig.Producer.Flush.MaxMessages = int(k.config.MaxPacketMsg)
 
-	k.client, err = sarama.NewClient(k.config.Addrs, k.saramaConfig)
-	if err != nil {
-		return err
-	}
-	k.producer, err = sarama.NewSyncProducer(k.config.Addrs, k.saramaConfig)
+	k.producer, err = sarama.NewAsyncProducer(k.config.Addrs, k.saramaConfig)
 	return err
+}
+
+func (k *KafkaOutput) processKafkaErrors(or pipeline.OutputRunner, errChan <-chan *sarama.ProducerError,
+	shutdownChan chan struct{}, wg *sync.WaitGroup) {
+
+	var (
+		ok   = true
+		pErr *sarama.ProducerError
+	)
+	for ok {
+		select {
+		case pErr, ok = <-errChan:
+			if !ok {
+				break
+			}
+			err := pErr.Err
+			switch err.(type) {
+			case sarama.PacketEncodingError:
+				atomic.AddInt64(&k.kafkaEncodingErrors, 1)
+				or.LogError(fmt.Errorf("kafka encoding error: %s", err.Error()))
+			default:
+				atomic.AddInt64(&k.kafkaDroppedMessages, 1)
+				if err != nil {
+					msgValue, _ := pErr.Msg.Value.Encode()
+					or.LogError(fmt.Errorf("kafka error '%s' for message '%s'", err.Error(),
+						string(msgValue)))
+				}
+			}
+		case <-shutdownChan:
+			ok = false
+			break
+		}
+	}
+	wg.Done()
 }
 
 func (k *KafkaOutput) Run(or pipeline.OutputRunner, h pipeline.PluginHelper) (err error) {
 	defer func() {
 		k.producer.Close()
-		k.client.Close()
 	}()
 
 	if or.Encoder() == nil {
@@ -294,6 +342,12 @@ func (k *KafkaOutput) Run(or pipeline.OutputRunner, h pipeline.PluginHelper) (er
 	}
 
 	inChan := or.InChan()
+	errChan := k.producer.Errors()
+	pInChan := k.producer.Input()
+	shutdownChan := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go k.processKafkaErrors(or, errChan, shutdownChan, &wg)
 
 	var (
 		pack  *pipeline.PipelinePack
@@ -331,28 +385,12 @@ func (k *KafkaOutput) Run(or pipeline.OutputRunner, h pipeline.PluginHelper) (er
 			Key:   key,
 			Value: sarama.ByteEncoder(msgBytes),
 		}
-
-		partition, offset, err := k.producer.SendMessage(pMessage)
-                _ = partition
-                _ = offset
-
-                if err != nil {
-                        switch err.(type) {
-                        case sarama.PacketEncodingError:
-                                atomic.AddInt64(&k.kafkaEncodingErrors, 1)
-                                or.LogError(fmt.Errorf("kafka encoding error: %s", err.Error()))
-                        default:
-                                e := pipeline.NewRetryMessageError(err.Error())
-			        pack.Recycle(e)
-                                atomic.AddInt64(&k.kafkaDroppedMessages, 1)
-                                or.LogError(fmt.Errorf("kafka raised error: %s while sending: %s", err.Error(),pMessage.Value))
-                        }
-                } else {
-                   or.UpdateCursor(pack.QueueCursor)
-		   pack.Recycle(nil)
-                }
+		pInChan <- pMessage
+		pack.Recycle(nil)
 	}
 
+	close(shutdownChan)
+	wg.Wait()
 	return
 }
 

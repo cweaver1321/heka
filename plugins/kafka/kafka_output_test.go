@@ -9,7 +9,6 @@
 #
 # Contributor(s):
 #   Mike Trinkala (trink@mozilla.com)
-#   Rob Miller (rmiller@mozilla.com)
 #
 # ***** END LICENSE BLOCK *****/
 
@@ -269,10 +268,12 @@ func TestInvalidCompressionCodec(t *testing.T) {
 
 func TestSendMessage(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	broker := sarama.NewMockBroker(t, 2)
+	b1 := sarama.NewMockBroker(t, 1)
+	b2 := sarama.NewMockBroker(t, 2)
 
 	defer func() {
-		broker.Close()
+		b1.Close()
+		b2.Close()
 		ctrl.Finish()
 	}()
 
@@ -280,17 +281,19 @@ func TestSendMessage(t *testing.T) {
 	globals := DefaultGlobals()
 	pConfig := NewPipelineConfig(globals)
 
-	broker.SetHandlerByMap(map[string]sarama.MockResponse{
-		"MetadataRequest": sarama.NewMockMetadataResponse(t).
-			SetBroker(broker.Addr(), broker.BrokerID()).
-			SetLeader(topic, 0, broker.BrokerID()),
-		"ProduceRequest": sarama.NewMockProduceResponse(t),
-	})
+	mdr := new(sarama.MetadataResponse)
+	mdr.AddBroker(b2.Addr(), b2.BrokerID())
+	mdr.AddTopicPartition(topic, 0, 2, nil, nil, 0)
+	b1.Returns(mdr)
+
+	pr := new(sarama.ProduceResponse)
+	pr.AddTopicPartition(topic, 0, 0)
+	b2.Returns(pr)
 
 	ko := new(KafkaOutput)
 	ko.SetPipelineConfig(pConfig)
 	config := ko.ConfigStruct().(*KafkaOutputConfig)
-	config.Addrs = append(config.Addrs, broker.Addr())
+	config.Addrs = append(config.Addrs, b1.Addr())
 	config.Topic = topic
 	err := ko.Init(config)
 	if err != nil {
@@ -306,8 +309,13 @@ func TestSendMessage(t *testing.T) {
 	pack := NewPipelinePack(pConfig.InputRecycleChan())
 	pack.Message = msg
 
+	outStr := "Write me out to the network"
+	newpack := NewPipelinePack(nil)
+	newpack.Message = msg
+
 	inChanCall := oth.MockOutputRunner.EXPECT().InChan().AnyTimes()
 	inChanCall.Return(inChan)
+	oth.MockOutputRunner.EXPECT().UsesBuffering().Return(false)
 
 	errChan := make(chan error)
 	startOutput := func() {
@@ -320,7 +328,6 @@ func TestSendMessage(t *testing.T) {
 	oth.MockOutputRunner.EXPECT().Encoder().Return(encoder)
 	oth.MockOutputRunner.EXPECT().Encode(pack).Return(encoder.Encode(pack))
 
-	outStr := "Write me out to the network"
 	pack.Message.SetPayload(outStr)
 	startOutput()
 
